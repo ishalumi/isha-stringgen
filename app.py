@@ -9,6 +9,7 @@ from storage import StringStorage
 from dotenv import load_dotenv
 import io
 import os
+from pathlib import Path
 
 # 加载环境变量
 load_dotenv()
@@ -20,10 +21,132 @@ app.json.ensure_ascii = False  # 支持中文 JSON
 DEFAULT_PREFIX = os.getenv('STRING_PREFIX', 'custom-')
 SERVER_HOST = os.getenv('SERVER_HOST', '127.0.0.1')
 SERVER_PORT = int(os.getenv('SERVER_PORT', '5000'))
+ENV_FILE_PATH = Path(__file__).with_name('.env')
 
 # 初始化生成器和存储
 generator = StringGenerator(prefix=DEFAULT_PREFIX)
 storage = StringStorage()
+app.config['ENV_FILE_PATH'] = ENV_FILE_PATH
+
+
+def get_env_file_path():
+    """获取配置文件路径，便于测试时覆盖。"""
+    return Path(app.config.get('ENV_FILE_PATH', ENV_FILE_PATH))
+
+
+def read_persisted_config():
+    """读取 .env 中保存的配置，用于页面回显。"""
+    persisted = {
+        'prefix': DEFAULT_PREFIX,
+        'host': SERVER_HOST,
+        'port': SERVER_PORT
+    }
+    env_path = get_env_file_path()
+
+    if not env_path.exists():
+        return persisted
+
+    with env_path.open('r', encoding='utf-8') as env_file:
+        for line in env_file:
+            line_stripped = line.strip()
+            if not line_stripped or line_stripped.startswith('#') or '=' not in line_stripped:
+                continue
+
+            key, value = line_stripped.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+
+            if key == 'STRING_PREFIX':
+                persisted['prefix'] = value
+            elif key == 'SERVER_HOST':
+                persisted['host'] = value
+            elif key == 'SERVER_PORT':
+                try:
+                    persisted['port'] = int(value)
+                except ValueError:
+                    continue
+
+    return persisted
+
+
+def validate_prefix(prefix):
+    """验证前缀配置。"""
+    prefix = prefix.strip()
+    if not prefix:
+        raise ValueError('前缀不能为空')
+    if any(c in prefix for c in '\r\n\0='):
+        raise ValueError('前缀不能包含控制字符或等号')
+    return prefix
+
+
+def validate_host(host):
+    """验证服务器地址配置。"""
+    host = host.strip()
+    if not host:
+        raise ValueError('服务器地址不能为空')
+    if any(c in host for c in '\r\n\0='):
+        raise ValueError('服务器地址不能包含控制字符或等号')
+    return host
+
+
+def validate_port(port):
+    """验证端口配置。"""
+    if isinstance(port, bool) or not isinstance(port, int) or port < 1 or port > 65535:
+        raise ValueError('端口必须在 1-65535 之间')
+    return port
+
+
+def persist_config(prefix=None, host=None, port=None):
+    """将配置写回 .env 文件。"""
+    updates = {}
+
+    if prefix is not None:
+        updates['STRING_PREFIX'] = prefix
+    if host is not None:
+        updates['SERVER_HOST'] = host
+    if port is not None:
+        updates['SERVER_PORT'] = str(port)
+
+    if not updates:
+        return
+
+    env_path = get_env_file_path()
+    env_lines = []
+
+    if env_path.exists():
+        with env_path.open('r', encoding='utf-8') as env_file:
+            env_lines = env_file.readlines()
+
+    updated_keys = set()
+    for index, line in enumerate(env_lines):
+        line_stripped = line.strip()
+        if not line_stripped or line_stripped.startswith('#') or '=' not in line_stripped:
+            continue
+
+        key = line_stripped.split('=', 1)[0].strip()
+        if key in updates:
+            env_lines[index] = f'{key}={updates[key]}\n'
+            updated_keys.add(key)
+
+    for key, value in updates.items():
+        if key not in updated_keys:
+            env_lines.append(f'{key}={value}\n')
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    with env_path.open('w', encoding='utf-8') as env_file:
+        env_file.writelines(env_lines)
+
+
+def build_config_response():
+    """构建当前配置响应。"""
+    persisted = read_persisted_config()
+    return {
+        'prefix': generator.prefix,
+        'saved_prefix': persisted['prefix'],
+        'default_prefix': DEFAULT_PREFIX,
+        'server_host': persisted['host'],
+        'server_port': persisted['port']
+    }
 
 
 # ==================== Web 页面 ====================
@@ -39,18 +162,40 @@ def index():
 @app.route('/api/config', methods=['GET'])
 def get_config():
     """获取当前配置"""
-    return jsonify({
-        'prefix': generator.prefix,
-        'default_prefix': DEFAULT_PREFIX,
-        'server_host': SERVER_HOST,
-        'server_port': SERVER_PORT
-    })
+    return jsonify(build_config_response())
+
+
+@app.route('/api/config/prefix', methods=['PATCH'])
+def update_prefix():
+    """实时更新前缀，并立即作用于后续生成。"""
+    try:
+        data = request.get_json(silent=True)
+        if data is None:
+            return jsonify({'error': '请求体格式错误'}), 400
+        if 'prefix' not in data:
+            return jsonify({'error': '缺少 prefix 字段'}), 400
+
+        prefix = validate_prefix((data.get('prefix') or ''))
+
+        persist_config(prefix=prefix)
+        generator.prefix = prefix
+
+        return jsonify({
+            'message': '前缀已实时生效',
+            'prefix': generator.prefix,
+            'formats': generator.get_supported_formats(prefix=generator.prefix)
+        })
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'更新失败: {str(e)}'}), 500
 
 
 @app.route('/api/config', methods=['POST'])
 def update_config():
     """
-    更新配置并保存到 .env 文件（需要重启服务生效）
+    更新配置并保存到 .env 文件
 
     请求体:
     {
@@ -64,71 +209,19 @@ def update_config():
         if data is None:
             return jsonify({'error': '请求体格式错误'}), 400
 
-        prefix = data.get('prefix', '').strip() if 'prefix' in data else None
-        host = data.get('host', '').strip() if 'host' in data else None
+        prefix = validate_prefix((data.get('prefix') or '')) if 'prefix' in data else None
+        host = validate_host((data.get('host') or '')) if 'host' in data else None
         port = data.get('port') if 'port' in data else None
 
         # 至少要更新一个字段
         if prefix is None and host is None and port is None:
             return jsonify({'error': '至少需要提供一个配置项'}), 400
 
-        # 验证前缀：禁止控制字符和等号
-        if prefix is not None:
-            if not prefix:
-                return jsonify({'error': '前缀不能为空'}), 400
-            if any(c in prefix for c in '\r\n\0='):
-                return jsonify({'error': '前缀不能包含控制字符或等号'}), 400
-
-        # 验证主机地址：禁止控制字符和等号
-        if host is not None:
-            if not host:
-                return jsonify({'error': '服务器地址不能为空'}), 400
-            if any(c in host for c in '\r\n\0='):
-                return jsonify({'error': '服务器地址不能包含控制字符或等号'}), 400
-
         # 验证端口
         if port is not None:
-            if not isinstance(port, int) or port < 1 or port > 65535:
-                return jsonify({'error': '端口必须在 1-65535 之间'}), 400
+            port = validate_port(port)
 
-        # 读取现有 .env 文件
-        env_path = os.path.join(os.path.dirname(__file__), '.env')
-        env_lines = []
-
-        if os.path.exists(env_path):
-            with open(env_path, 'r', encoding='utf-8') as f:
-                env_lines = f.readlines()
-
-        # 更新配置
-        updated = set()
-        for i, line in enumerate(env_lines):
-            line_stripped = line.strip()
-            if line_stripped.startswith('#') or '=' not in line_stripped:
-                continue
-
-            key = line_stripped.split('=')[0].strip()
-
-            if prefix is not None and key == 'STRING_PREFIX':
-                env_lines[i] = f'STRING_PREFIX={prefix}\n'
-                updated.add('STRING_PREFIX')
-            elif host is not None and key == 'SERVER_HOST':
-                env_lines[i] = f'SERVER_HOST={host}\n'
-                updated.add('SERVER_HOST')
-            elif port is not None and key == 'SERVER_PORT':
-                env_lines[i] = f'SERVER_PORT={port}\n'
-                updated.add('SERVER_PORT')
-
-        # 添加未存在的配置项
-        if prefix is not None and 'STRING_PREFIX' not in updated:
-            env_lines.append(f'STRING_PREFIX={prefix}\n')
-        if host is not None and 'SERVER_HOST' not in updated:
-            env_lines.append(f'SERVER_HOST={host}\n')
-        if port is not None and 'SERVER_PORT' not in updated:
-            env_lines.append(f'SERVER_PORT={port}\n')
-
-        # 写回 .env 文件
-        with open(env_path, 'w', encoding='utf-8') as f:
-            f.writelines(env_lines)
+        persist_config(prefix=prefix, host=host, port=port)
 
         # 前缀立即生效，端口和地址需要重启
         if prefix is not None:
@@ -146,9 +239,13 @@ def update_config():
                 'prefix': prefix,
                 'host': host,
                 'port': port
-            }
+            },
+            'config': build_config_response(),
+            'formats': generator.get_supported_formats(prefix=generator.prefix)
         })
 
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         return jsonify({'error': f'更新失败: {str(e)}'}), 500
 
@@ -156,7 +253,7 @@ def update_config():
 @app.route('/api/formats', methods=['GET'])
 def get_formats():
     """获取支持的所有格式"""
-    return jsonify(generator.get_supported_formats())
+    return jsonify(generator.get_supported_formats(prefix=generator.prefix))
 
 
 @app.route('/api/generate', methods=['POST'])
@@ -179,7 +276,7 @@ def generate_string():
         length = data.get('length', 32)
 
         # 获取格式信息
-        formats = generator.get_supported_formats()
+        formats = generator.get_supported_formats(prefix=generator.prefix)
         format_info = formats.get(format_type)
 
         if not format_info:
@@ -238,7 +335,8 @@ def save_entry():
         "name": "my_key",           // 自定义名称（必填）
         "value": "custom-abc123",   // 字符串值（必填）
         "format": "hex",            // 格式类型（必填）
-        "length": 32                // 长度（可选）
+        "length": 32,               // 长度（可选）
+        "enforce_prefix": true      // 是否自动补当前前缀（可选）
     }
     """
     try:
@@ -250,6 +348,7 @@ def save_entry():
         value = (data.get('value') or '').strip()
         format_type = (data.get('format') or '').strip()
         length = data.get('length')
+        enforce_prefix = data.get('enforce_prefix', True)
 
         # 验证必填字段
         if not name:
@@ -258,15 +357,17 @@ def save_entry():
             return jsonify({'error': '值不能为空'}), 400
         if not format_type:
             return jsonify({'error': '格式类型不能为空'}), 400
+        if not isinstance(enforce_prefix, bool):
+            return jsonify({'error': 'enforce_prefix 必须是布尔值'}), 400
 
         # 验证格式类型是否支持
-        formats = generator.get_supported_formats()
+        formats = generator.get_supported_formats(prefix=generator.prefix)
         format_info = formats.get(format_type)
         if not format_info:
             return jsonify({'error': f'不支持的格式: {format_type}'}), 400
 
-        # 强制确保前缀存在
-        if not value.startswith(generator.prefix):
+        # 手动输入时才自动补当前前缀，已生成/已存在的值允许原样保存
+        if enforce_prefix and not value.startswith(generator.prefix):
             value = generator.prefix + value
 
         # 对于不支持长度的格式，忽略长度参数
@@ -309,8 +410,9 @@ def update_entry(entry_id):
 
     请求体:
     {
-        "name": "new_name",    // 新名称（可选）
-        "value": "new_value"   // 新值（可选）
+        "name": "new_name",         // 新名称（可选）
+        "value": "new_value",       // 新值（可选）
+        "enforce_prefix": true      // 是否自动补当前前缀（可选）
     }
     """
     try:
@@ -320,13 +422,16 @@ def update_entry(entry_id):
 
         name = (data.get('name') or '').strip() if 'name' in data else None
         value = (data.get('value') or '').strip() if 'value' in data else None
+        enforce_prefix = data.get('enforce_prefix', True)
 
         # 至少要更新一个字段
         if name is None and value is None:
             return jsonify({'error': '至少需要提供一个更新字段'}), 400
+        if not isinstance(enforce_prefix, bool):
+            return jsonify({'error': 'enforce_prefix 必须是布尔值'}), 400
 
-        # 如果更新值，强制确保前缀存在
-        if value is not None and not value.startswith(generator.prefix):
+        # 编辑已有值时允许原样保存，仅在显式要求时补当前前缀
+        if value is not None and enforce_prefix and not value.startswith(generator.prefix):
             value = generator.prefix + value
 
         # 更新记录
@@ -413,7 +518,7 @@ if __name__ == '__main__':
     print("=" * 50)
     print("🚀 字符串生成器启动中...")
     print(f"📍 访问地址: http://{SERVER_HOST}:{SERVER_PORT}")
-    print(f"🔧 字符串前缀: {DEFAULT_PREFIX}")
+    print(f"🔧 字符串前缀: {generator.prefix}")
     print("=" * 50)
 
     # 通过环境变量控制 debug 模式

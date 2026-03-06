@@ -2,9 +2,14 @@
 let formats = {};
 let currentEntry = null;
 let editingEntryId = null;
+let lastSavedPrefix = '';
+let prefixSaveTimer = null;
+let prefixRequestToken = 0;
 
 // DOM 元素
 const elements = {
+    prefixInput: document.getElementById('prefix-input'),
+    prefixStatus: document.getElementById('prefix-status'),
     formatSelect: document.getElementById('format-select'),
     formatDescription: document.getElementById('format-description'),
     lengthGroup: document.getElementById('length-group'),
@@ -30,7 +35,6 @@ const elements = {
 
     configBtn: document.getElementById('config-btn'),
     configModal: document.getElementById('config-modal'),
-    configPrefix: document.getElementById('config-prefix'),
     configHost: document.getElementById('config-host'),
     configPort: document.getElementById('config-port'),
     configSaveBtn: document.getElementById('config-save-btn'),
@@ -49,9 +53,12 @@ const elements = {
 
 // 初始化
 async function init() {
-    await loadFormats();
-    await loadEntries();
     bindEvents();
+    await Promise.all([
+        loadFormats(),
+        loadRuntimeConfig(),
+        loadEntries()
+    ]);
 }
 
 // 加载格式信息
@@ -63,6 +70,155 @@ async function loadFormats() {
     } catch (error) {
         showToast('加载格式信息失败', 'error');
     }
+}
+
+// 加载当前运行时配置
+async function loadRuntimeConfig() {
+    try {
+        const response = await fetch('/api/config');
+        const config = await response.json();
+
+        if (response.ok) {
+            lastSavedPrefix = config.prefix || '';
+            elements.prefixInput.value = lastSavedPrefix;
+            setPrefixStatus('已同步，修改后自动保存', 'idle');
+        } else {
+            setPrefixStatus('加载失败', 'error');
+            showToast(config.error || '加载配置失败', 'error');
+        }
+    } catch (error) {
+        setPrefixStatus('网络错误', 'error');
+        showToast('加载配置失败', 'error');
+    }
+}
+
+// 设置前缀同步状态
+function setPrefixStatus(message, state = 'idle') {
+    elements.prefixStatus.textContent = message;
+    elements.prefixStatus.className = `prefix-status prefix-status-${state}`;
+}
+
+// 校验前缀输入
+function getPrefixValidationError(prefix) {
+    if (!prefix) {
+        return '前缀不能为空';
+    }
+
+    if (/[=\r\n\u0000]/.test(prefix)) {
+        return '前缀不能包含控制字符或等号';
+    }
+
+    return '';
+}
+
+// 计划前缀保存
+function schedulePrefixSave() {
+    const prefix = elements.prefixInput.value.trim();
+    const validationError = getPrefixValidationError(prefix);
+
+    clearTimeout(prefixSaveTimer);
+
+    if (validationError) {
+        setPrefixStatus(validationError, 'error');
+        return;
+    }
+
+    if (prefix === lastSavedPrefix) {
+        setPrefixStatus('已同步，修改后自动保存', 'idle');
+        return;
+    }
+
+    setPrefixStatus('检测到变更，准备保存...', 'pending');
+    prefixSaveTimer = setTimeout(() => {
+        savePrefix(prefix);
+    }, 400);
+}
+
+// 立即保存前缀
+async function flushPrefixSave() {
+    const prefix = elements.prefixInput.value.trim();
+    const validationError = getPrefixValidationError(prefix);
+
+    clearTimeout(prefixSaveTimer);
+
+    if (validationError) {
+        setPrefixStatus(validationError, 'error');
+        return;
+    }
+
+    if (prefix === lastSavedPrefix) {
+        setPrefixStatus('已同步，修改后自动保存', 'idle');
+        return;
+    }
+
+    await savePrefix(prefix);
+}
+
+// 保存前缀并立即生效
+async function savePrefix(prefix) {
+    const requestToken = ++prefixRequestToken;
+    setPrefixStatus('前缀保存中...', 'pending');
+
+    try {
+        const response = await fetch('/api/config/prefix', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prefix })
+        });
+
+        const data = await response.json();
+
+        if (requestToken !== prefixRequestToken) {
+            return false;
+        }
+
+        if (response.ok) {
+            lastSavedPrefix = data.prefix;
+            elements.prefixInput.value = data.prefix;
+            if (data.formats) {
+                formats = data.formats;
+                updateFormatDescription();
+            }
+            setPrefixStatus('前缀已保存，已立即生效', 'success');
+            return true;
+        } else {
+            setPrefixStatus(data.error || '保存失败', 'error');
+            return false;
+        }
+    } catch (error) {
+        if (requestToken !== prefixRequestToken) {
+            return false;
+        }
+
+        setPrefixStatus('网络错误，前缀未保存', 'error');
+        return false;
+    }
+}
+
+// 在执行依赖前缀的操作前，确保前缀已同步到后端
+async function ensurePrefixSynced() {
+    const prefix = elements.prefixInput.value.trim();
+    const validationError = getPrefixValidationError(prefix);
+
+    clearTimeout(prefixSaveTimer);
+
+    if (validationError) {
+        setPrefixStatus(validationError, 'error');
+        showToast(validationError, 'error');
+        return false;
+    }
+
+    if (prefix === lastSavedPrefix) {
+        return true;
+    }
+
+    const saved = await savePrefix(prefix);
+    if (!saved) {
+        showToast('前缀保存失败，请稍后重试', 'error');
+        return false;
+    }
+
+    return true;
 }
 
 // 更新格式描述
@@ -89,6 +245,10 @@ function updateFormatDescription() {
 async function generateString() {
     const format = elements.formatSelect.value;
     const length = parseInt(elements.lengthInput.value);
+
+    if (!(await ensurePrefixSynced())) {
+        return;
+    }
 
     elements.generateBtn.disabled = true;
     elements.generateBtn.textContent = '生成中...';
@@ -161,7 +321,8 @@ async function saveEntry() {
                 name,
                 value: currentEntry.value,
                 format: currentEntry.format,
-                length: currentEntry.length
+                length: currentEntry.length,
+                enforce_prefix: false
             })
         });
 
@@ -187,6 +348,10 @@ async function saveManualEntry() {
     const name = elements.manualName.value.trim();
     const value = elements.manualValue.value.trim();
     const format = elements.manualFormat.value;
+
+    if (!(await ensurePrefixSynced())) {
+        return;
+    }
 
     if (!name) {
         showToast('请输入名称', 'error');
@@ -341,6 +506,10 @@ async function saveEdit() {
     const name = elements.editName.value.trim();
     const value = elements.editValue.value.trim();
 
+    if (!(await ensurePrefixSynced())) {
+        return;
+    }
+
     if (!name || !value) {
         showToast('名称和值不能为空', 'error');
         return;
@@ -352,7 +521,7 @@ async function saveEdit() {
         const response = await fetch(`/api/entries/${editingEntryId}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, value })
+            body: JSON.stringify({ name, value, enforce_prefix: false })
         });
 
         const data = await response.json();
@@ -461,7 +630,6 @@ async function openConfigModal() {
         const config = await response.json();
 
         if (response.ok) {
-            elements.configPrefix.value = config.prefix || '';
             elements.configHost.value = config.server_host || '';
             elements.configPort.value = config.server_port || '';
             elements.configModal.classList.add('active');
@@ -480,14 +648,8 @@ function closeConfigModal() {
 
 // 保存配置
 async function saveConfig() {
-    const prefix = elements.configPrefix.value.trim();
     const host = elements.configHost.value.trim();
     const port = parseInt(elements.configPort.value);
-
-    if (!prefix) {
-        showToast('前缀不能为空', 'error');
-        return;
-    }
 
     if (!host) {
         showToast('服务器地址不能为空', 'error');
@@ -505,13 +667,13 @@ async function saveConfig() {
         const response = await fetch('/api/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prefix, host, port })
+            body: JSON.stringify({ host, port })
         });
 
         const data = await response.json();
 
         if (response.ok) {
-            showToast('配置已保存，请重启服务使配置生效', 'success');
+            showToast(data.message || '配置已保存', 'success');
             closeConfigModal();
         } else {
             showToast(data.error || '保存失败', 'error');
@@ -525,6 +687,16 @@ async function saveConfig() {
 
 // 绑定事件
 function bindEvents() {
+    // 实时前缀
+    elements.prefixInput.addEventListener('input', schedulePrefixSave);
+    elements.prefixInput.addEventListener('blur', flushPrefixSave);
+    elements.prefixInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            flushPrefixSave();
+        }
+    });
+
     // 格式选择变化
     elements.formatSelect.addEventListener('change', updateFormatDescription);
 

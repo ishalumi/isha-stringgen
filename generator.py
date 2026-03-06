@@ -96,43 +96,43 @@ class StringGenerator:
         return f"{self.prefix}{header}.{payload}.{signature}"
 
     @staticmethod
-    def get_supported_formats():
+    def get_supported_formats(prefix="prefix-"):
         """获取支持的所有格式"""
         return {
             "uuid": {
                 "name": "UUID 标准格式",
                 "description": "带连字符的标准 UUID v4",
-                "example": "prefix-550e8400-e29b-41d4-a716-446655440000",
+                "example": f"{prefix}550e8400-e29b-41d4-a716-446655440000",
                 "supports_length": False
             },
             "uuid_hex": {
                 "name": "UUID 十六进制",
                 "description": "32位十六进制 UUID（无连字符）",
-                "example": "prefix-550e8400e29b41d4a716446655440000",
+                "example": f"{prefix}550e8400e29b41d4a716446655440000",
                 "supports_length": False
             },
             "hex": {
                 "name": "十六进制",
                 "description": "纯十六进制字符串",
-                "example": "prefix-a1b2c3d4e5f6...",
+                "example": f"{prefix}a1b2c3d4e5f6...",
                 "supports_length": True
             },
             "base64url": {
                 "name": "Base64 URL安全",
                 "description": "URL 安全的 base64 编码",
-                "example": "prefix-A1b2C3d4E5f6...",
+                "example": f"{prefix}A1b2C3d4E5f6...",
                 "supports_length": True
             },
             "alnum": {
                 "name": "字母数字",
                 "description": "大小写字母和数字混合",
-                "example": "prefix-aB1cD2eF3gH4...",
+                "example": f"{prefix}aB1cD2eF3gH4...",
                 "supports_length": True
             },
             "jwt": {
                 "name": "JWT 风格",
                 "description": "三段式 JWT 格式（header.payload.signature）",
-                "example": "prefix-xxxxx.yyyyy.zzzzz",
+                "example": f"{prefix}xxxxx.yyyyy.zzzzz",
                 "supports_length": True,
                 "length_note": "长度仅控制中间段（payload）"
             }

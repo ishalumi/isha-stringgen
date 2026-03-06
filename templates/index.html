@@ -39,6 +39,21 @@
                         生成字符串
                     </h2>
 
+                    <div class="live-prefix-panel">
+                        <div class="live-prefix-header">
+                            <div class="live-prefix-title">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V7a3 3 0 0 1 3-3h4"></path><path d="M20 13v4a3 3 0 0 1-3 3h-4"></path><path d="M8 12h8"></path><path d="M13 7l3 5-3 5"></path></svg>
+                                实时前缀
+                            </div>
+                            <span id="prefix-status" class="prefix-status prefix-status-idle">加载中...</span>
+                        </div>
+                        <div class="form-group">
+                            <label for="prefix-input">当前前缀</label>
+                            <input type="text" id="prefix-input" class="form-control" placeholder="例如: custom-">
+                            <small class="form-text">输入后自动保存，新的前缀会立即用于生成、手动保存和编辑补前缀</small>
+                        </div>
+                    </div>
+
                     <!-- 格式选择 -->
                     <div class="form-group">
                         <label for="format-select">格式类型</label>
@@ -178,11 +193,6 @@
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <label for="config-prefix">字符串前缀</label>
-                    <input type="text" id="config-prefix" class="form-control" placeholder="例如: custom-">
-                    <small class="form-text">建议以 - 结尾</small>
-                </div>
-                <div class="form-group">
                     <label for="config-host">服务器地址</label>
                     <input type="text" id="config-host" class="form-control" placeholder="127.0.0.1">
                     <small class="form-text">修改后需要重启服务</small>
@@ -193,7 +203,7 @@
                     <small class="form-text">修改后需要重启服务</small>
                 </div>
                 <div class="alert alert-info">
-                    💡 配置将保存到 .env 文件，修改端口和地址后需要重启服务才能生效
+                    💡 前缀已移到主界面实时保存；这里的地址和端口会写入 .env，修改后需要重启服务
                 </div>
             </div>
             <div class="modal-footer">
